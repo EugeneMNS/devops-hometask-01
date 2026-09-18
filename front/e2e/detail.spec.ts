@@ -27,7 +27,7 @@ test('edits title and description, then persists after reload', async ({
   await page.getByTestId('detail-save').click();
 
   // toast indicates save
-  await expect(page.getByText('Saved')).toBeVisible();
+  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
 
   await page.reload();
   await expect(page.getByTestId('detail-title')).toHaveValue('Edited title');
@@ -44,7 +44,7 @@ test('toggles completed state on the detail page', async ({ page }) => {
   await expect(checkbox).toHaveAttribute('data-state', 'unchecked');
   await checkbox.click();
   await page.getByTestId('detail-save').click();
-  await expect(page.getByText('Saved')).toBeVisible();
+  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
 
   await page.reload();
   await expect(page.getByTestId('detail-completed')).toHaveAttribute(
