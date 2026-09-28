@@ -10,6 +10,7 @@
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     env_file:
       - .env.development.db
     ports:
@@ -24,6 +25,7 @@ services:
       start_period: 5s
 
   back:
+    restart: unless-stopped
     image: ${DOCKERHUB_USERNAME}/todo-back:${IMAGE_TAG}
     platform: linux/amd64
     env_file:
@@ -37,6 +39,7 @@ services:
       - ./app-config:/app/config:ro
 
   front:
+    restart: unless-stopped
     image: ${DOCKERHUB_USERNAME}/todo-front:${IMAGE_TAG}
     platform: linux/amd64
     ports:
