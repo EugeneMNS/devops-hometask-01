@@ -1,6 +1,6 @@
-# Docker Compose файл для hw2.
+# Docker Compose: готовые образы из Docker Hub.
 #
-# Имя образа для back/front собирается из переменных DOCKERHUB_USERNAME и IMAGE_TAG —
+# Имя образа для back/front собирается из DOCKERHUB_USERNAME и APP_VERSION —
 # их compose берёт из .env.development.compose, который мы передаём флагом --env-file
 # (см. Makefile).
 #
@@ -26,10 +26,12 @@ services:
 
   back:
     restart: unless-stopped
-    image: ${DOCKERHUB_USERNAME}/todo-back:${IMAGE_TAG}
+    image: ${DOCKERHUB_USERNAME}/todo-back:${APP_VERSION}
     platform: linux/amd64
     env_file:
       - .env.development.back
+    environment:
+      APP_VERSION: ${APP_VERSION}
     ports:
       - "127.0.0.1:13000:3000"
     depends_on:
@@ -40,7 +42,7 @@ services:
 
   front:
     restart: unless-stopped
-    image: ${DOCKERHUB_USERNAME}/todo-front:${IMAGE_TAG}
+    image: ${DOCKERHUB_USERNAME}/todo-front:${APP_VERSION}
     platform: linux/amd64
     ports:
       - "127.0.0.1:18080:80"
