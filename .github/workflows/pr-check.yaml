@@ -8,5 +8,6 @@ permissions:
   contents: read
 
 jobs:
+  # Reuse the same TypeScript checks that run before a production build.
   checks:
     uses: ./.github/workflows/typecheck.yaml
