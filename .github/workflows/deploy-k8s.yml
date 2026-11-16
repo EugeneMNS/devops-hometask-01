@@ -1,0 +1,140 @@
+name: Deploy Kubernetes
+
+on:
+  push:
+    branches: [week6]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/typecheck.yaml
+
+  build:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to Docker Hub
+        env:
+          DOCKER_USER: ${{ secrets.DOCKER_USER }}
+          DOCKER_PASS: ${{ secrets.DOCKER_PASS }}
+        run: printf '%s' "$DOCKER_PASS" | docker login --username "$DOCKER_USER" --password-stdin
+      - name: Build and push backend
+        env:
+          DOCKER_USER: ${{ secrets.DOCKER_USER }}
+        run: |
+          : "${DOCKER_USER:?Set repository secret DOCKER_USER}"
+          image="$DOCKER_USER/todo-back"
+          docker build --platform linux/amd64 \
+            -t "$image:sha-$GITHUB_SHA" -t "$image:latest" back
+          docker push "$image:sha-$GITHUB_SHA"
+          docker push "$image:latest"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.35.10
+      - name: Configure Kubernetes access
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          : "${KUBE_CONFIG:?Set repository secret KUBE_CONFIG (base64 kubeconfig)}"
+          umask 077
+          printf '%s' "$KUBE_CONFIG" | base64 --decode > "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+      - name: Apply backend and wait for rollout
+        env:
+          DOCKER_USER: ${{ secrets.DOCKER_USER }}
+        run: |
+          set -euo pipefail
+          : "${DOCKER_USER:?Set repository secret DOCKER_USER}"
+          export IMAGE="$DOCKER_USER/todo-back:sha-$GITHUB_SHA"
+          export APP_VERSION="sha-$GITHUB_SHA"
+          command -v envsubst
+          envsubst '${IMAGE} ${APP_VERSION}' < k8s/backend.yaml | kubectl -n default apply -f -
+          kubectl -n default rollout status deployment/backend --timeout=300s
+      - name: Remove temporary kubeconfig
+        if: always()
+        run: rm -f "$RUNNER_TEMP/kubeconfig"
+
+  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify external routes, readiness and deployed SHA
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          EXPECTED_VERSION: sha-${{ github.sha }}
+        run: |
+          : "${VITE_API_URL:?Set repository variable VITE_API_URL}"
+          api_url="${VITE_API_URL%/}"
+          export E2E_BASE_URL="${api_url%/api}"
+          printf 'E2E_BASE_URL=%s\n' "$E2E_BASE_URL" > .env.production.e2e
+          for attempt in {1..12}; do
+            if make smoke-deployed && \
+              curl --fail --silent --show-error --max-time 10 "$api_url/ready" && \
+              curl --fail --silent --show-error --max-time 10 "$api_url/health" | \
+                node -e 'const h = JSON.parse(require("fs").readFileSync(0, "utf8")); if (h.status !== "ok" || h.version !== process.env.EXPECTED_VERSION) { console.error("Version mismatch:", h.version, "expected", process.env.EXPECTED_VERSION); process.exit(1); } console.log("Verified version:", h.version);'; then
+              exit 0
+            fi
+            echo "Waiting for application startup ($attempt/12)"
+            sleep 5
+          done
+          echo 'Kubernetes deployment failed smoke, readiness or SHA verification'
+          exit 1
+
+  notify:
+    needs: [checks, build, deploy, verify]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send deployment status to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CHECKS: ${{ needs.checks.result }}
+          BUILD: ${{ needs.build.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          VERIFY: ${{ needs.verify.result }}
+        run: |
+          : "${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN}"
+          : "${TELEGRAM_CHAT_ID:?Set TELEGRAM_CHAT_ID}"
+          if [[ "$CHECKS" != success ]]; then
+            status="❌ Type-check: $CHECKS"
+          elif [[ "$BUILD" != success ]]; then
+            status="❌ Build: $BUILD"
+          elif [[ "$DEPLOY" != success ]]; then
+            status="❌ Deploy: $DEPLOY"
+          elif [[ "$VERIFY" != success ]]; then
+            status="❌ Smoke / readiness / SHA verification: $VERIFY"
+          else
+            status='✅ Деплой Kubernetes успешен'
+          fi
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          text=$(printf '%s\n%s @ %s\nActor: %s\nVersion: sha-%s\n%s' \
+            "$status" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_ACTOR" "$GITHUB_SHA" "$run_url")
+          response=$(curl --silent --show-error --max-time 30 \
+            -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+            --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+            --data-urlencode "text=$text" \
+            -d 'disable_web_page_preview=true')
+          echo "$response" | grep -q '"ok":true' || { echo 'Telegram API rejected'; exit 1; }
