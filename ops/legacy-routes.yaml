@@ -1,0 +1,188 @@
+# Preserve existing public endpoints while system nginx hands ports 80/443 to k3s.
+# The bot containers and the existing Grafana container remain on the VPS.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: legacy-proxy-config
+data:
+  default.conf: |
+    map $http_upgrade $legacy_connection_upgrade {
+      default upgrade;
+      '' close;
+    }
+    server {
+      listen 18103 default_server;
+      server_name _;
+      location = /__proxy_health { return 204; }
+      location / { return 404; }
+    }
+    server {
+      listen 18103;
+      server_name bot.novik.tech;
+      proxy_connect_timeout 2s;
+      proxy_read_timeout 5s;
+      location = /developer/api/health {
+        proxy_pass http://127.0.0.1:18100/api/health;
+      }
+      location = /profile2/api/health {
+        proxy_pass http://127.0.0.1:18101/api/health;
+      }
+      location = /profile3/api/health {
+        proxy_pass http://127.0.0.1:18102/api/health;
+      }
+      location / { return 404; }
+    }
+    server {
+      listen 18103;
+      server_name novik.tech;
+      return 301 https://hw3.novik.tech$request_uri;
+    }
+    server {
+      listen 18103;
+      server_name grafana.hw3.novik.tech;
+      location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $http_x_real_ip;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $legacy_connection_upgrade;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legacy-proxy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: legacy-proxy
+  template:
+    metadata:
+      labels:
+        app: legacy-proxy
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: vps-3b85fc4f
+      # Existing Docker services bind to host loopback only.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: nginx
+          image: eugenemns/todo-front:sha-b209edd646bca3b030f9e6ae4b32ead83e60002f
+          ports:
+            - name: http
+              containerPort: 18103
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /__proxy_health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /__proxy_health
+              port: http
+            periodSeconds: 20
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: legacy-proxy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: legacy-proxy
+spec:
+  selector:
+    app: legacy-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: legacy-bot
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [bot.novik.tech]
+      secretName: bot-tls
+  rules:
+    - host: bot.novik.tech
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: legacy-proxy
+                port:
+                  name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: legacy-grafana
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [grafana.hw3.novik.tech]
+      secretName: grafana-tls
+  rules:
+    - host: grafana.hw3.novik.tech
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: legacy-proxy
+                port:
+                  name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: apex-redirect
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [novik.tech]
+      secretName: apex-tls
+  rules:
+    - host: novik.tech
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: legacy-proxy
+                port:
+                  number: 80

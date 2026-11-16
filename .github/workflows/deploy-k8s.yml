@@ -63,7 +63,10 @@ jobs:
           : "${DOCKER_USER:?Set repository secret DOCKER_USER}"
           export IMAGE="$DOCKER_USER/todo-back:sha-$GITHUB_SHA"
           export APP_VERSION="sha-$GITHUB_SHA"
-          command -v envsubst
+          if ! command -v envsubst >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base
+          fi
           envsubst '${IMAGE} ${APP_VERSION}' < k8s/backend.yaml | kubectl -n default apply -f -
           kubectl -n default rollout status deployment/backend --timeout=300s
       - name: Remove temporary kubeconfig

@@ -3,6 +3,7 @@
 node_modules
 test-results
 back/dist/
+__pycache__/
 
 
 # committed: .env.development.* (local docker creds only)
